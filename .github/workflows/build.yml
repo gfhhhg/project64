@@ -1,0 +1,134 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Build target platform'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - windows
+          - android
+      windows_arch:
+        description: 'Windows architecture (for Windows build)'
+        required: false
+        default: 'x64'
+        type: choice
+        options:
+          - x64
+          - Win32
+          - both
+      build_config:
+        description: 'Build configuration'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+
+jobs:
+  windows:
+    name: Build Windows
+    runs-on: windows-latest
+    if: ${{ github.event.inputs.platform == 'windows' || github.event.inputs.platform == 'both' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{
+          (github.event.inputs.windows_arch == 'both' && fromJSON('["x64", "Win32"]')) ||
+          (github.event.inputs.windows_arch && fromJSON(format('["{0}"]', github.event.inputs.windows_arch))) ||
+          fromJSON('["x64"]')
+        }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: |
+          msbuild Project64.sln /p:Configuration=${{ github.event.inputs.build_config }} /p:Platform=${{ matrix.arch }} /m
+        shell: cmd
+
+      - name: Find build output
+        id: find_output
+        run: |
+          $arch = "${{ matrix.arch }}"
+          $config = "${{ github.event.inputs.build_config }}"
+          $binDir = "Bin\$arch\$config"
+          $pluginDir = "Plugin\$arch"
+          
+          if (Test-Path $binDir) {
+            Write-Output "bin_dir=$binDir" >> $env:GITHUB_OUTPUT
+          }
+          
+          if (Test-Path $pluginDir) {
+            Write-Output "plugin_dir=$pluginDir" >> $env:GITHUB_OUTPUT
+          }
+          
+          $exePath = "$binDir\Project64.exe"
+          if (Test-Path $exePath) {
+            Write-Output "exe_path=$exePath" >> $env:GITHUB_OUTPUT
+          }
+          
+          $setupPath = Get-ChildItem -Path $binDir -Filter "Setup*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if ($setupPath) {
+            Write-Output "setup_path=$setupPath" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Project64-Windows-${{ matrix.arch }}-${{ github.event.inputs.build_config }}
+          path: |
+            Bin/${{ matrix.arch }}/${{ github.event.inputs.build_config }}/
+            Plugin/${{ matrix.arch }}/
+          if-no-files-found: warn
+
+  android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.platform == 'android' || github.event.inputs.platform == 'both' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Gradle
+        working-directory: ./Android
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        working-directory: ./Android
+        run: ./gradlew assembleRelease
+
+      - name: Find APK
+        id: find_apk
+        run: |
+          apk_path=$(find Android/app/build/outputs/apk -name "*.apk" | head -1)
+          if [ -n "$apk_path" ]; then
+            echo "apk_path=$apk_path" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Project64-Android
+          path: Android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: warn
